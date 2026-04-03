@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CUAS Live Stream Server  v3
+CUAS Live Stream Server  
 ============================
 Run:  python cuas_server.py
       python cuas_server.py --drones 4 --speed 5 --port 8765
@@ -8,7 +8,7 @@ Run:  python cuas_server.py
 Opens http://localhost:8765 automatically in the browser.
 The 3D viewer receives observations via Server-Sent Events (SSE).
 
-Pipeline integration (other Python modules):
+Pipeline integration (for other Python modules):
     from cuas_data_generator import SensorDataGenerator, ObservationQueue
     gen = SensorDataGenerator(n_drones=3, seed=42, sim_speed=1.0)
     q   = ObservationQueue()

@@ -1,16 +1,10 @@
 """
-CUAS Synthetic Sensor Data Generator  v2.0
-===========================================
-Master Thesis – TLC Engineering
-Counter-UAS multi-sensor data fusion engine.
-
 Topology
 --------
   All active sensor heads (RADAR, RF1, RF2) sit at the coordinate ORIGIN (0,0,0).
   The 100 acoustic nodes form a 10×10 regular grid over the full scan area, placed
   at ground level (z=0) with known coordinates.  This layout lets the downstream
-  preprocessing module estimate the direction-of-arrival from the acoustic network
-  via TDOA (time-difference of arrival) or SPL-gradient triangulation.
+  preprocessing module estimate the direction-of-arrival from the acoustic network.
 
 Scan area
 ---------
@@ -37,7 +31,7 @@ Pipeline interface
   carries a `modality` tag and a `sensor_pos` field (acoustic nodes only) so
   the fusion module always knows where each observation was produced.
 
-    from cuas_data_generator import SensorDataGenerator, ObservationQueue
+    from data_generator import SensorDataGenerator, ObservationQueue
     gen = SensorDataGenerator(n_drones=3, seed=0, sim_speed=5.0)
     q   = ObservationQueue()
     gen.start(q)
@@ -63,13 +57,13 @@ import numpy as np
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Scan area – 15 km × 15 km square, origin at centre
-AREA_SIDE   : float = 15_000.0   # metres
+AREA_SIDE   : float = 15_000.0   # m
 HALF        : float = AREA_SIDE / 2.0
 
 AREA_Z_MIN  : float = 20.0       # m  – min drone altitude
 AREA_Z_MAX  : float = 1000.0      # m  – max drone altitude
 
-# Acoustic grid – 5 × 5 = 25 nodes uniformly tiled over the area, z = 0
+# Acoustic grid – 10 × 10 = 100 nodes uniformly tiled over the area, z = 0
 ACOUSTIC_GRID_N : int = 10        # nodes per side
 
 # Sampling rates (different, non-integer ratios → temporal misalignment)
@@ -78,7 +72,7 @@ RF1_DT      : float = 0.25       #  4 Hz
 RF2_DT      : float = 0.50       #  2 Hz
 ACOUSTIC_DT : float = 0.05       # 20 Hz
 
-# Noise parameters (physics-motivated)
+# Noise parameters 
 RADAR_RANGE_NOISE   : float = 5.0     # m
 RADAR_AZ_NOISE      : float = 0.4     # deg
 RADAR_EL_NOISE      : float = 0.4     # deg  (elevation)
@@ -88,7 +82,7 @@ RADAR_SNR_BASE      : float = 25.0    # dB at 1 km
 RF1_DOA_NOISE       : float = 1.5     # deg
 RF1_SS_NOISE        : float = 2.5     # dBm
 
-RF2_POS_NOISE       : float = 8.0     # m  (GPS consumer-grade)
+RF2_POS_NOISE       : float = 8.0     # m  
 RF2_VEL_NOISE       : float = 0.4     # m/s
 RF2_ACC_NOISE       : float = 0.15    # m/s²
 RF2_SNR_BASE        : float = 18.0    # dB
@@ -140,7 +134,7 @@ class RadarObservation:
     """RADAR polar measurement at the centroid sensor."""
     t               : float
     sensor_id       : str
-    drone_id        : str            # simulator truth label (kept for debugging only)
+    drone_id        : str            # simulator truth label (debugging only)
     range           : float          # m
     azimuth         : float          # deg CW from North
     radial_velocity : float          # m/s  (positive = receding)
@@ -259,26 +253,40 @@ class DroneState:
 
         n = max(1, int(round(dt / self.PHYSICS_DT)))
         adt = dt / n
+
+        # Distance between actual position and target waypoint
+
         for _ in range(n):
             err = self._target_wp - self.pos
             horiz = err[:2]
             horiz_dist = float(np.linalg.norm(horiz))
+
+            # Moving with the waypoint based mechanism 
+
             if horiz_dist < WP_RADIUS and abs(err[2]) < 18.0:
                 self._advance_waypoint()
                 err = self._target_wp - self.pos
                 horiz = err[:2]
                 horiz_dist = float(np.linalg.norm(horiz))
 
+            # Realistic heading and turning control mechanism 
+
             desired_heading = self.heading if horiz_dist < 1e-6 else math.atan2(horiz[0], horiz[1])
             heading_err = (desired_heading - self.heading + math.pi) % (2.0 * math.pi) - math.pi
             turn = float(np.clip(heading_err, -MAX_TURN_RATE * adt, MAX_TURN_RATE * adt))
             self.heading = (self.heading + turn) % (2.0 * math.pi)
+
+
+            # Velocity control mechanism
 
             hovering = self.t < self._hover_until
             desired_speed = 0.0 if hovering else float(np.clip(0.020 * horiz_dist + 9.0, MIN_SPEED, MAX_SPEED))
             speed_err = desired_speed - self._speed
             speed_step = float(np.clip(speed_err, -MAX_H_ACC * adt, MAX_H_ACC * adt))
             self._speed = float(np.clip(self._speed + speed_step, 0.0, MAX_SPEED))
+            
+
+            # Horizontal and vertical velocity control (proportional to altitude error)
 
             vx = self._speed * math.sin(self.heading)
             vy = self._speed * math.cos(self.heading)
@@ -287,6 +295,8 @@ class DroneState:
             self.acc = (new_vel - self.vel) / max(adt, 1e-6)
             self.vel = new_vel
             self.pos += self.vel * adt
+
+            # Boundary control
 
             for i in range(2):
                 if abs(self.pos[i]) > HALF * 0.48:
@@ -322,6 +332,8 @@ _ORIGIN = np.zeros(3)   # sensors at origin
 # Per-modality observation factories
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Simple SNR model
+
 def _snr_db(base: float, range_m: float, ref_range: float = 1000.0) -> float:
     """SNR decreases 20 dB per decade of range (one-way free space, simplified)."""
     return base - 20.0 * math.log10(max(range_m, 1.0) / ref_range)
@@ -352,6 +364,7 @@ def make_rf1_obs(drone: DroneState, t: float,
         return None
     R  = drone.range_from(_ORIGIN)
     az = drone.azimuth_from(_ORIGIN)
+
     # Free-space path loss (one-way, 2.4 GHz simplified)
     ss = -20.0 - 20.0 * math.log10(max(R, 1.0) / 100.0) + float(rng.normal(0, RF1_SS_NOISE))
     return RF1Observation(
@@ -570,8 +583,7 @@ class _AcousticWorker(threading.Thread):
                     horiz_R = float(np.linalg.norm(proxy.pos[:2] - node_pos[:2]))
                     # Coarse outdoor acoustic model: the array is mainly sensitive to
                     # horizontal proximity and provides only rough bearing support.
-                    # We clamp with an effective range so multiple neighboring nodes can
-                    # activate, as expected by the array-level coarse bearing stage.
+                    # Multiple neighboring nodes can activate.
                     spl = ACOUSTIC_SRC_LEVEL - 20.0 * math.log10(max(horiz_R, 1.0)) + float(self._rng.normal(0, ACOUSTIC_INT_NOISE))
                     if horiz_R > ACOUSTIC_ARRAY_MAX_RANGE:
                         spl -= 12.0 + 0.01 * (horiz_R - ACOUSTIC_ARRAY_MAX_RANGE)
@@ -708,7 +720,7 @@ class SensorDataGenerator:
             "RF2_01", RF2_DT, make_rf2_obs,
             self.drones, out_q, _rng(), self._tref, lock))
 
-        # Acoustic array (all 25 nodes, one thread)
+        # Acoustic array (all 100 nodes, one thread)
         self._workers.append(_AcousticWorker(
             ACOUSTIC_NODES, self.drones, out_q, _rng(), self._tref, lock))
 
@@ -741,7 +753,7 @@ class SensorDataGenerator:
 
     @property
     def acoustic_node_positions(self) -> Dict[str, Tuple[float, float, float]]:
-        """Return {sensor_id: (x,y,z)} for all 25 acoustic nodes."""
+        """Return {sensor_id: (x,y,z)} for all 100 acoustic nodes."""
         return {sid: tuple(pos.tolist()) for sid, pos in ACOUSTIC_NODES}
 
 
